@@ -1,0 +1,25 @@
+{
+  "name": "tunel-chat-mcp",
+  "version": "3.2.1",
+  "private": true,
+  "license": "Apache-2.0",
+  "type": "module",
+  "bin": {
+    "tunel-chat-mcp": "./cli.mjs"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "panel": "node control-panel.mjs",
+    "cli": "node cli.mjs",
+    "test": "node test-process-environment.mjs && node test-platform-runtime.mjs && node test-platform-safety.mjs && node test-cli.mjs && node test-secret-scanner.mjs && node test-security-regressions.mjs && node test-workspace-tree.mjs && node test-chatgpt-files.mjs && node test-server.mjs && node test-control-panel.mjs",
+    "check": "node scripts/check-source.mjs",
+    "security:scan": "node scripts/scan-secrets.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.17.4",
+    "zod": "^3.25.76"
+  }
+}
