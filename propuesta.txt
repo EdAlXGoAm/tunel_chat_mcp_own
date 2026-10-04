@@ -1,0 +1,294 @@
+PROPUESTA: TUNNEL ÁGIL CON CEREBRAS COMO PRODUCTOR PRINCIPAL
+
+OBJETIVO
+
+Convertir el tunnel en una herramienta rápida de investigación e implementación
+dirigida por un coordinador externo, con esta división:
+
+- Coordinador: define el trabajo, fija los contratos, decide y verifica.
+- Composer lector: obtiene evidencia actual del repositorio.
+- Cerebras: realiza el razonamiento principal y produce código completo,
+  propuestas de refactorización y análisis extensos.
+- Composer ejecutor: aplica la propuesta aprobada y comprueba el resultado.
+- Grok: segunda opinión opcional para preguntas concretas de riesgo.
+
+La rapidez debe venir de reducir vueltas y trabajo duplicado, manteniendo
+el alcance autorizado y la comprobación del resultado.
+
+
+1. FLUJO PRINCIPAL
+
+Coordinator brief
+    → Composer lectura
+    → Cerebras propuesta y código
+    → revisión del coordinador
+    → Composer ejecución
+    → checks y evidencia
+    → cierre del coordinador.
+
+Grok deja de ser un requisito obligatorio entre propuesta y ejecución.
+
+Permitir tres modalidades:
+
+A) consult:
+   Lectura → Cerebras análisis/propuesta → resultado, sin cambios.
+
+B) change:
+   Lectura → Cerebras código/propuesta → aprobación del coordinador
+   → ejecución → checks.
+
+C) revisión adicional:
+   El coordinador solicita una revisión concreta a Grok cuando la necesita.
+
+Conservar aprobación manual cuando esté configurada. La autorización humana
+puede delegar al coordinador la aprobación de piezas dentro de un alcance;
+no volver a pedirla en cada ciclo.
+
+
+2. COMPOSER COMO LECTOR
+
+Composer debe proporcionar a Cerebras un paquete de evidencia compacto,
+actual y suficiente:
+
+- Workspace remoto, HEAD y estado de cambios relevantes.
+- Archivos autorizados y archivos que sólo pueden leerse.
+- Firmas, tipos, imports y fragmentos completos necesarios.
+- Contratos de comportamiento y dependencias.
+- Harness y comandos de comprobación reales.
+- Preguntas todavía no resueltas.
+
+Priorizar la lectura necesaria para producir el cambio. No hacer una
+investigación general del proyecto si el encargo es acotado.
+
+Antes de pasar a Cerebras, comprobar que el paquete contiene las firmas
+de las APIs que deberá utilizar. Si falta una firma, leerla; no adivinarla.
+
+Composer no debe producir por defecto un segundo análisis largo que
+repita el trabajo asignado a Cerebras.
+
+
+3. CEREBRAS COMO PRODUCTOR PRINCIPAL
+
+Cerebras debe recibir directamente:
+
+- El brief íntegro del coordinador.
+- La evidencia actual reunida por Composer.
+- El alcance y las restricciones.
+- Las correcciones pendientes y sus razones.
+
+Debe poder producir:
+
+- Bloques completos de funciones o archivos.
+- Parches aplicables sobre el contenido leído.
+- Refactorizaciones dentro del alcance autorizado.
+- Análisis extensos cuando sean útiles.
+- Pruebas que ejerciten el código de producción.
+
+No imponer límites artificiales de 350 caracteres ni pedir una simple
+“adopción del contrato” cuando se necesita código.
+
+No aceptar como entrega ejecutable:
+- Pseudocódigo.
+- Placeholders.
+- Bloques truncados.
+- Imports o helpers supuestos.
+- Pruebas que copian el algoritmo en vez de importar producción.
+
+Si falta evidencia, Cerebras debe solicitar una lectura concreta a Composer.
+Esa lectura vuelve al mismo ciclo; no debe obligar a crear otra tarea completa.
+
+
+4. COMPOSER COMO EJECUTOR
+
+Después de la aprobación, Composer aplica el artefacto de Cerebras.
+
+Puede adaptar detalles mecánicos necesarios para aplicarlo, pero debe
+detenerse y comunicar una incompatibilidad cuando implique cambiar:
+
+- El alcance.
+- Una API o contrato.
+- El comportamiento esperado.
+- La estrategia de pruebas.
+- Las condiciones de integración.
+
+Antes de aplicar:
+- Verificar que los archivos relevantes siguen correspondiendo a la lectura.
+- Detectar cambios concurrentes.
+- Preservar el trabajo ajeno.
+
+Después de aplicar:
+- Ejecutar los checks acordados.
+- Entregar diff, stdout relevante y códigos de salida.
+- Separar implementación, comprobación, commit, push y despliegue.
+
+Un check fallido debe volver a Cerebras con el error y el fragmento actual.
+Composer no debe improvisar una reimplementación extensa que desplace
+a Cerebras como productor principal.
+
+
+5. PAPEL OPCIONAL DE GROK
+
+Eliminar su dictamen como puerta obligatoria de aprobación técnica.
+
+El coordinador puede invocarlo para una pregunta específica:
+- ¿Esta transición permite una carrera?
+- ¿La copia conserva todos los campos?
+- ¿La prueba realmente reproduce el defecto?
+- ¿El parche modifica algo fuera del alcance?
+
+Salida breve y estructurada:
+- Hallazgo.
+- Evidencia concreta.
+- Consecuencia.
+- Corrección sugerida.
+- Incertidumbre.
+
+Grok no debe:
+- Inventar nuevas condiciones de autorización.
+- Exigir checks activos cuando la coordinación requiere que hayan terminado.
+- Ampliar el alcance.
+- Reescribir todo el plan por defecto.
+- Obligar a otra vuelta sólo por formato.
+
+El coordinador acepta o descarta sus observaciones con razones.
+La revisión adicional no sustituye la comprobación de fuentes y resultados.
+
+Si se conserva Grok obligatorio durante una transición, su resultado
+debe ser advisory y no alterar por sí solo el estado operativo de la tarea.
+
+
+6. SEPARAR DECISIÓN TÉCNICA Y ESTADO OPERATIVO
+
+No mezclar:
+- “Grok recomienda corregir”.
+- “El coordinador decidió aprobar”.
+- “La herramienta permite ejecutar”.
+- “La ejecución terminó”.
+
+Proponer estados explícitos:
+
+reading
+needs_source
+proposing
+ready_for_coordinator
+approved
+implementing
+checking
+needs_revision
+completed
+failed
+
+Una propuesta con observaciones puede estar ready_for_coordinator.
+No convertir automáticamente una opinión desfavorable en analysis_only.
+
+approve_task debe registrar una decisión autorizada del coordinador,
+no depender de que otro modelo haya escrito “implement”.
+
+La aprobación debe ser idempotente:
+- Una aprobación por versión de propuesta.
+- Repetir la llamada devuelve el estado actual.
+- Nunca dispara una segunda ejecución.
+
+
+7. BRIEF VIGENTE Y CONTEXTO SIN CONTAMINACIÓN
+
+Mantener un contrato vigente separado del historial:
+
+- Objetivo.
+- Alcance exacto.
+- Autorización.
+- Invariantes.
+- Decisiones del coordinador.
+- Evidencia actual.
+- Criterios de aceptación.
+- Entregables y checks.
+
+Un followup debe poder reemplazar ese contrato de forma explícita.
+Las instrucciones sustituidas no deben seguir apareciendo como vigentes.
+
+Conservar el historial para consulta, pero no reenviarlo entero en cada etapa.
+Mostrar decisiones anteriores sólo cuando siguen siendo relevantes.
+
+Las conclusiones del coordinador deben llegar íntegramente a Composer,
+Cerebras y al revisor opcional, con su evidencia y fecha de vigencia.
+
+La prioridad del brief no implica aprobar por obediencia:
+si contradice las fuentes, el agente debe identificar la contradicción.
+
+
+8. ARTEFACTOS COMPLETOS Y CONSULTA EFICIENTE
+
+Guardar propuestas, código, parches y logs como artefactos por etapa.
+
+get_task debe devolver un estado compacto con:
+- Etapa actual y revisión de propuesta.
+- Necesidad de acción del coordinador.
+- Archivos previstos o modificados.
+- Checks y resultado.
+- Referencias a artefactos.
+- Cambio desde la consulta anterior.
+
+get_task_context debe permitir consultar:
+- Sólo la etapa actual.
+- Un artefacto específico.
+- Rangos del código o del log.
+- El contrato vigente.
+
+No sustituir el código solicitado por un resumen o mapa de líneas.
+Si supera el límite de respuesta, paginarlo o devolver un artefacto completo.
+
+Añadir espera por cambios/eventos para evitar polling repetitivo.
+No crear otra tarea mientras la actual sigue trabajando.
+
+
+9. REPARACIÓN DENTRO DEL MISMO CICLO
+
+Permitir un bucle acotado:
+
+Composer lee error y fuente actual
+    → Cerebras produce corrección
+    → coordinador revisa según autorización
+    → Composer aplica y comprueba.
+
+Mantener identidad y alcance de la tarea.
+Crear una tarea nueva sólo si cambia la pieza de trabajo.
+
+Después de errores repetidos, identificar qué falta o qué se contradice,
+en vez de repetir el mismo prompt.
+
+Si hay cambios concurrentes, pedir nuevas lecturas relevantes;
+no resetear, revertir ni sobrescribir trabajo ajeno.
+
+
+10. MEDICIÓN Y ORDEN DE IMPLEMENTACIÓN
+
+Registrar duración y consumo por etapa:
+lectura, Cerebras, revisión opcional, espera de aprobación,
+ejecución, checks y reparaciones.
+
+Comparar tareas similares con y sin Grok obligatorio:
+- Tiempo total hasta resultado comprobado.
+- Número de ciclos.
+- Defectos encontrados antes y después de ejecutar.
+- Propuestas que inventaron APIs.
+- Cambios fuera del alcance.
+- Coste total.
+
+No afirmar mejoras de velocidad sin medirlas.
+
+Prioridad sugerida:
+
+1) Separar la opinión de Grok de la aprobación operativa.
+2) Transmitir brief vigente y evidencia sin historial contradictorio.
+3) Dar a Cerebras producción completa de código y propuestas.
+4) Incorporar needs_source y reparaciones dentro de la misma tarea.
+5) Añadir artefactos completos, eventos y métricas.
+
+CRITERIO DE ÉXITO
+
+El coordinador entrega un encargo claro; Composer reúne fuentes;
+Cerebras produce una solución completa; Composer la ejecuta dentro
+del alcance; los checks aportan evidencia; el coordinador cierra.
+
+Menos vueltas por contexto perdido, APIs inventadas o dictámenes de formato.
+Más trabajo útil de Cerebras y ejecución comprobable de Composer.

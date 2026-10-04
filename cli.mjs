@@ -20,6 +20,43 @@ import { canonicalPathForComparison, createProfile, normalizePathForIdentity, re
 
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 
+/** Load KEY=VALUE lines into process.env without overriding existing values. */
+async function loadEnvFile(filePath, { map = {} } = {}) {
+  let text;
+  try {
+    text = await fs.readFile(filePath, "utf8");
+  } catch {
+    return;
+  }
+  for (const rawLine of text.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#") || !line.includes("=")) continue;
+    const eq = line.indexOf("=");
+    const name = line.slice(0, eq).trim();
+    let value = line.slice(eq + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    const target = map[name] || name;
+    if (process.env[target] == null || process.env[target] === "") {
+      process.env[target] = value;
+    }
+    // Alias APIKEY → CONTROL_PLANE_API_KEY when the canonical name is empty.
+    if (name === "APIKEY" && (!process.env.CONTROL_PLANE_API_KEY || process.env.CONTROL_PLANE_API_KEY === "")) {
+      process.env.CONTROL_PLANE_API_KEY = value;
+    }
+  }
+}
+
+async function loadLocalEnv() {
+  await loadEnvFile(path.join(projectRoot, ".env"));
+  // Auth for admin_cursor Live MCP bridge (never print these).
+  await loadEnvFile(path.join(projectRoot, "..", "admin_cursor", ".env"));
+}
+
 function parseArguments(argv) {
   const positionals = [];
   const flags = new Map();
@@ -42,7 +79,7 @@ function help() {
 Uso:
   tunel-chat-mcp platform [--json]
   tunel-chat-mcp credential set [--data-root RUTA]
-  tunel-chat-mcp setup --workspace RUTA --tunnel-id tunnel_ID [--client RUTA] [--profile NOMBRE] [--health-listen-addr 127.0.0.1:PUERTO] [--panel-port PUERTO] [--data-root RUTA]
+  tunel-chat-mcp setup --workspace RUTA --tunnel-id tunnel_ID [--client RUTA] [--profile NOMBRE] [--mcp-server admin-cursor-live|files] [--health-listen-addr 127.0.0.1:PUERTO] [--panel-port PUERTO] [--data-root RUTA]
   tunel-chat-mcp run [--workspace RUTA] [--non-interactive] [--data-root RUTA] [--client RUTA] [--profile NOMBRE] [--health-listen-addr 127.0.0.1:PUERTO] [--panel-port PUERTO]
   tunel-chat-mcp tunnel start|stop|restart|status [--data-root RUTA]
   tunel-chat-mcp autostart enable|disable|status [--data-root RUTA]
@@ -205,36 +242,138 @@ export function validateTunnelId(value) {
   return tunnelId;
 }
 
+function vendorTunnelClientPath() {
+  const vendorDir = path.join(projectRoot, "vendor", "tunnel-client");
+  if (process.platform === "win32") return path.join(vendorDir, "tunnel-client.exe");
+  // Linux/macOS zip ships as tunnel-client-runtime-cloudflared (no .exe).
+  return path.join(vendorDir, "tunnel-client-runtime-cloudflared");
+}
+
 function clientCommand(flags) {
   if (flags.get("client")) return normalizeClientCommand(String(flags.get("client")));
   if (process.env.MCP_TUNNEL_CLIENT_PATH) return normalizeClientCommand(process.env.MCP_TUNNEL_CLIENT_PATH);
-  if (process.platform === "win32") return path.join(projectRoot, "vendor", "tunnel-client", "tunnel-client.exe");
-  return "tunnel-client";
+  return vendorTunnelClientPath();
+}
+
+function resolveMcpCommand(flags) {
+  const server = String(flags.get("mcp-server") || process.env.MCP_TUNNEL_MCP_SERVER || "files").trim();
+  if (server === "admin-cursor-live") {
+    const launcher = path.resolve(projectRoot, "..", "admin_cursor", "mcp-live-bridge", "launcher.mjs");
+    const commandLine = `${process.execPath} ${launcher}`;
+    return { server, mcpCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(launcher)}`, commandLine, launcher };
+  }
+  if (server === "files" || server === "default") {
+    const serverPath = path.join(projectRoot, "mcp-launcher.mjs");
+    const commandLine = `${process.execPath} ${serverPath}`;
+    return {
+      server: "files",
+      mcpCommand: `${JSON.stringify(process.execPath)} ${JSON.stringify(serverPath)}`,
+      commandLine,
+      launcher: serverPath,
+    };
+  }
+  throw new Error("mcp-server debe ser admin-cursor-live o files.");
+}
+
+function defaultProfileDir() {
+  if (process.env.TUNNEL_CLIENT_PROFILE_DIR) return path.resolve(process.env.TUNNEL_CLIENT_PROFILE_DIR);
+  if (process.env.XDG_CONFIG_HOME) return path.join(process.env.XDG_CONFIG_HOME, "tunnel-client");
+  return path.join(os.homedir(), ".config", "tunnel-client");
+}
+
+async function clientSupportsInit(client) {
+  return await new Promise((resolve) => {
+    const child = spawn(client, ["init", "--help"], {
+      cwd: projectRoot,
+      env: buildSanitizedEnvironment(process.env),
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("close", (code) => {
+      resolve(code === 0 && !/unknown command/i.test(stderr));
+    });
+    child.on("error", () => resolve(false));
+  });
+}
+
+async function writeRuntimeProfile({ profile, tunnelId, commandLine, healthListenAddr, cloudflaredPath }) {
+  const profileDir = defaultProfileDir();
+  await fs.mkdir(profileDir, { recursive: true, mode: 0o700 });
+  const profileFile = path.join(profileDir, `${profile}.yaml`);
+  // Poll-only Secure MCP Tunnel: managed cloudflared needs Tunnels Use + CF provisioning.
+  // Keep companion path available but leave managed off unless explicitly enabled later.
+  const yaml = [
+    "control_plane:",
+    `  tunnel_id: ${tunnelId}`,
+    "  api_key: env:CONTROL_PLANE_API_KEY",
+    "mcp:",
+    "  commands:",
+    `    - command: ${JSON.stringify(commandLine)}`,
+    "      channel: main",
+    "cloudflared:",
+    "  managed: false",
+    ...(cloudflaredPath ? [`  path: ${JSON.stringify(cloudflaredPath)}`] : []),
+    "health:",
+    `  listen_addr: ${healthListenAddr}`,
+    "",
+  ].join("\n");
+  await fs.writeFile(profileFile, yaml, { encoding: "utf8", mode: 0o600 });
+  return profileFile;
 }
 
 async function configure(flags, dataRoot) {
   const tunnelId = validateTunnelId(flags.get("tunnel-id"));
   const workspace = await validateWorkspace(flags.get("workspace"), dataRoot);
   const key = await loadControlPlaneKey({ dataRoot, projectRoot });
+  // Persist key from .env/APIKEY into the local store for later runs.
+  await storeControlPlaneKey(key, { dataRoot, projectRoot });
   const client = clientCommand(flags);
   const profile = resolveClientProfile(flags.get("profile") === true ? undefined : flags.get("profile"));
   const healthListenAddr = resolveHealthListenAddr(flags.get("health-listen-addr") === true ? undefined : flags.get("health-listen-addr"));
   const controlPanelPort = resolveControlPanelPort(flags.get("panel-port") === true ? undefined : flags.get("panel-port"));
-  const environment = buildTunnelClientEnvironment(process.env, key, { MCP_WORKSPACE_ROOT: workspace, MCP_TUNNEL_DATA_ROOT: dataRoot });
-  const serverPath = path.join(projectRoot, "mcp-launcher.mjs");
-  const mcpCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(serverPath)}`;
-  await runChild(client, [
-    "init", "--force", "--sample", "sample_mcp_stdio_local",
-    "--profile", profile,
-    "--tunnel-id", tunnelId,
-    "--mcp-command", mcpCommand,
-    "--health-listen-addr", healthListenAddr,
-  ], { env: environment });
-  await runChild(client, ["doctor", "--profile", profile, "--explain"], { env: environment });
+  const { server: mcpServer, mcpCommand, commandLine } = resolveMcpCommand(flags);
+  const environment = buildTunnelClientEnvironment(process.env, key, {
+    MCP_WORKSPACE_ROOT: workspace,
+    MCP_TUNNEL_DATA_ROOT: dataRoot,
+    ADMIN_CURSOR_LIVE_BASE_URL: process.env.ADMIN_CURSOR_LIVE_BASE_URL || "http://127.0.0.1:3001",
+    ADMIN_CURSOR_API_TOKEN: process.env.ADMIN_CURSOR_API_TOKEN || "",
+    ADMIN_CURSOR_USER: process.env.ADMIN_CURSOR_USER || "admin",
+    ADMIN_CURSOR_PASSWORD: process.env.ADMIN_CURSOR_PASSWORD || "",
+  });
+  const supportsInit = await clientSupportsInit(client);
+  let profileFile = null;
+  if (supportsInit) {
+    await runChild(client, [
+      "init", "--force", "--sample", "sample_mcp_stdio_local",
+      "--profile", profile,
+      "--tunnel-id", tunnelId,
+      "--mcp-command", mcpCommand,
+      "--health-listen-addr", healthListenAddr,
+    ], { env: environment });
+    await runChild(client, ["doctor", "--profile", profile, "--explain"], { env: environment });
+  } else {
+    const cloudflaredPath = path.join(projectRoot, "vendor", "tunnel-client", "cloudflared");
+    profileFile = await writeRuntimeProfile({
+      profile,
+      tunnelId,
+      commandLine,
+      healthListenAddr,
+      cloudflaredPath,
+    });
+    process.stdout.write(`Perfil runtime escrito en ${profileFile} (binario sin init/doctor).\n`);
+  }
   await selectRunWorkspace(dataRoot, { workspaceOverride: workspace });
   await atomicWriteJson(path.join(dataRoot, "tunnel.json"), { tunnelId, updatedAtUtc: new Date().toISOString() });
-  await atomicWriteJson(path.join(dataRoot, "runtime.json"), { profile, healthListenAddr, controlPanelPort, updatedAtUtc: new Date().toISOString() });
-  process.stdout.write(`Configuracion verificada y guardada (perfil ${profile}, panel ${controlPanelPort}, salud ${healthListenAddr}).\n`);
+  await atomicWriteJson(path.join(dataRoot, "runtime.json"), {
+    profile,
+    healthListenAddr,
+    controlPanelPort,
+    mcpServer,
+    profileFile,
+    updatedAtUtc: new Date().toISOString(),
+  });
+  process.stdout.write(`Configuracion verificada y guardada (perfil ${profile}, mcp ${mcpServer}, panel ${controlPanelPort}, salud ${healthListenAddr}).\n`);
 }
 
 export function resolveControlPanelPort(value = process.env.CONTROL_PANEL_PORT) {
@@ -259,6 +398,7 @@ async function loadRuntimeBindings(dataRoot, flags) {
     profile: resolveClientProfile(profileFlag === true ? undefined : (profileFlag || saved.profile || process.env.MCP_TUNNEL_CLIENT_PROFILE)),
     healthListenAddr: resolveHealthListenAddr(healthFlag === true ? undefined : (healthFlag || saved.healthListenAddr || process.env.MCP_TUNNEL_HEALTH_LISTEN_ADDR)),
     controlPanelPort: resolveControlPanelPort(panelFlag === true ? undefined : (panelFlag || saved.controlPanelPort || process.env.CONTROL_PANEL_PORT)),
+    profileFile: typeof saved.profileFile === "string" && saved.profileFile ? saved.profileFile : (process.env.TUNNEL_CLIENT_PROFILE_FILE || ""),
     hasSaved,
   };
   return bindings;
@@ -272,7 +412,7 @@ async function runController(flags, dataRoot) {
     interactive: !flags.has("non-interactive") && process.stdin.isTTY === true && process.stdout.isTTY === true,
   });
   const key = await loadControlPlaneKey({ dataRoot, projectRoot });
-  const { profile, healthListenAddr, controlPanelPort, hasSaved } = await loadRuntimeBindings(dataRoot, flags);
+  const { profile, healthListenAddr, controlPanelPort, profileFile, hasSaved } = await loadRuntimeBindings(dataRoot, flags);
   if (!hasSaved) {
     process.stderr.write(`Aviso: no hay runtime.json en ${dataRoot}. Usando perfil ${profile}, panel ${controlPanelPort} y salud ${healthListenAddr}. Si corres otra instancia, vuelve a ejecutar setup con --profile y --health-listen-addr distintos.\n`);
   }
@@ -287,6 +427,15 @@ async function runController(flags, dataRoot) {
   environment.CONTROL_PANEL_PORT = String(controlPanelPort);
   environment.CONTROL_PANEL_OPEN_BROWSER = flags.has("non-interactive") ? "0" : "1";
   environment.CONTROL_PANEL_SHOW_URL = flags.has("non-interactive") ? "0" : "1";
+  if (profileFile) {
+    environment.TUNNEL_CLIENT_PROFILE_FILE = profileFile;
+    environment.MCP_TUNNEL_PROFILE_FILE = profileFile;
+  }
+  // Pass admin_cursor auth into the tunnel so the Live MCP child can call /api/live.
+  environment.ADMIN_CURSOR_LIVE_BASE_URL = process.env.ADMIN_CURSOR_LIVE_BASE_URL || "http://127.0.0.1:3001";
+  if (process.env.ADMIN_CURSOR_API_TOKEN) environment.ADMIN_CURSOR_API_TOKEN = process.env.ADMIN_CURSOR_API_TOKEN;
+  if (process.env.ADMIN_CURSOR_USER) environment.ADMIN_CURSOR_USER = process.env.ADMIN_CURSOR_USER;
+  if (process.env.ADMIN_CURSOR_PASSWORD) environment.ADMIN_CURSOR_PASSWORD = process.env.ADMIN_CURSOR_PASSWORD;
   await runChild(process.execPath, [path.join(projectRoot, "control-panel.mjs")], { env: environment });
 }
 
@@ -311,6 +460,7 @@ async function callLocalController(dataRoot, action) {
 }
 
 export async function main(argv = process.argv.slice(2)) {
+  await loadLocalEnv();
   const { positionals, flags } = parseArguments(argv);
   const command = positionals[0] || "help";
   const dataRoot = path.resolve(String(flags.get("data-root") || process.env.MCP_TUNNEL_DATA_ROOT || defaultDataRoot()));

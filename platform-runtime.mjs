@@ -127,6 +127,24 @@ function credentialAccount() {
   return account;
 }
 
+function fileCredentialPath(dataRoot) {
+  return path.join(dataRoot, "control-plane.key");
+}
+
+async function storeControlPlaneKeyFile(key, dataRoot) {
+  await fs.mkdir(dataRoot, { recursive: true, mode: 0o700 });
+  const filePath = fileCredentialPath(dataRoot);
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  await fs.writeFile(temporaryPath, `${key}\n`, { encoding: "utf8", mode: 0o600 });
+  await fs.rename(temporaryPath, filePath);
+  await fs.chmod(filePath, 0o600);
+}
+
+async function loadControlPlaneKeyFile(dataRoot) {
+  const text = await fs.readFile(fileCredentialPath(dataRoot), "utf8");
+  return validateControlPlaneKey(text.split(/\r?\n/, 1)[0] || "");
+}
+
 export async function storeControlPlaneKey(keyValue, options = {}) {
   const key = validateControlPlaneKey(keyValue);
   const platform = options.platform || process.platform;
@@ -147,8 +165,14 @@ export async function storeControlPlaneKey(keyValue, options = {}) {
     return;
   }
   if (platform === "linux") {
-    await runCommand("secret-tool", ["store", `--label=${productName}`, "application", serviceId, "credential", "control-plane"], { input: key, sensitiveValues: [key] });
-    return;
+    try {
+      await runCommand("secret-tool", ["store", `--label=${productName}`, "application", serviceId, "credential", "control-plane"], { input: key, sensitiveValues: [key] });
+      return;
+    } catch {
+      // Headless servers often lack Secret Service; fall back to a 0600 file under dataRoot.
+      await storeControlPlaneKeyFile(key, dataRoot);
+      return;
+    }
   }
   platformCapabilities(platform);
 }
@@ -157,6 +181,12 @@ export async function loadControlPlaneKey(options = {}) {
   const platform = options.platform || process.platform;
   const projectRoot = options.projectRoot || moduleRoot;
   const dataRoot = options.dataRoot || defaultDataRoot(platform);
+  const fromEnv =
+    process.env.CONTROL_PLANE_API_KEY ||
+    process.env.APIKEY ||
+    process.env.OPENAI_API_KEY ||
+    process.env.OPENAI_ADMIN_KEY;
+  if (fromEnv) return validateControlPlaneKey(fromEnv);
   let result;
   if (platform === "win32") {
     const helper = path.join(projectRoot, "credential-store.ps1");
@@ -164,7 +194,11 @@ export async function loadControlPlaneKey(options = {}) {
   } else if (platform === "darwin") {
     result = await runCommand("/usr/bin/security", ["find-generic-password", "-a", credentialAccount(), "-s", serviceId, "-w"]);
   } else if (platform === "linux") {
-    result = await runCommand("secret-tool", ["lookup", "application", serviceId, "credential", "control-plane"]);
+    try {
+      result = await runCommand("secret-tool", ["lookup", "application", serviceId, "credential", "control-plane"]);
+    } catch {
+      return loadControlPlaneKeyFile(dataRoot);
+    }
   } else {
     platformCapabilities(platform);
   }
@@ -197,16 +231,13 @@ export async function deleteControlPlaneKey(options = {}) {
     if (!keychainItemAbsent(remaining)) throw new Error("No se pudo confirmar la eliminacion de la credencial de Keychain.");
     return;
   }
-  const attributes = ["application", serviceId, "credential", "control-plane"];
-  const deletion = await runCommand("secret-tool", ["clear", ...attributes], { allowFailure: true });
-  const noUnlockedMatch = deletion.code === 1 && !deletion.stdout.trim() && !deletion.stderr.trim();
-  if (deletion.code !== 0 && !noUnlockedMatch) throw new Error("Fallo al eliminar la credencial de Secret Service.");
-  // clear only removes unlocked items. search --all also returns locked items;
-  // never include its output in errors because it can contain remaining secrets.
-  const remaining = await runCommand("secret-tool", ["search", "--all", ...attributes], { allowFailure: true });
-  if (remaining.code !== 0 || remaining.stdout.trim() || remaining.stderr.trim()) {
-    throw new Error("No se pudo confirmar la eliminacion de la credencial de Secret Service. Comprueba el almacen desbloqueado.");
+  try {
+    const attributes = ["application", serviceId, "credential", "control-plane"];
+    await runCommand("secret-tool", ["clear", ...attributes], { allowFailure: true });
+  } catch {
+    // secret-tool may be absent on headless hosts
   }
+  await fs.rm(fileCredentialPath(dataRoot), { force: true });
 }
 
 async function launchAgentLoaded() {

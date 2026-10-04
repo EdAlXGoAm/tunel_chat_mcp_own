@@ -1,5 +1,6 @@
 export const controlPlaneSecretNames = Object.freeze([
   "CONTROL_PLANE_API_KEY",
+  "APIKEY",
   "OPENAI_API_KEY",
   "OPENAI_ADMIN_KEY",
 ]);

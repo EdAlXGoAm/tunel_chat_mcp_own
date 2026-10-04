@@ -52,7 +52,11 @@ import {
 const projectRoot = path.dirname(fileURLToPath(import.meta.url));
 const panelRoot = path.join(projectRoot, "panel");
 const defaultDataRoot = process.env.MCP_TUNNEL_DATA_ROOT || platformDefaultDataRoot();
-const defaultClientPath = process.env.MCP_TUNNEL_CLIENT_PATH || (process.platform === "win32" ? path.join(projectRoot, "vendor", "tunnel-client", "tunnel-client.exe") : "tunnel-client");
+const defaultClientPath = process.env.MCP_TUNNEL_CLIENT_PATH || (
+  process.platform === "win32"
+    ? path.join(projectRoot, "vendor", "tunnel-client", "tunnel-client.exe")
+    : path.join(projectRoot, "vendor", "tunnel-client", "tunnel-client-runtime-cloudflared")
+);
 
 export function loopbackOrigin(host, port) {
   const hostname = host === "::1" ? "[::1]" : host;
@@ -222,7 +226,12 @@ export async function createControlPanel(options = {}) {
       return { changed: true };
     }
     if (path.isAbsolute(clientPath) || clientPath.includes(path.sep)) await fs.access(clientPath);
-    tunnelProcess = await spawnTunnelProcess(clientPath, ["run", "--profile", clientProfile, "--health.listen-addr", healthListenAddr], {
+    // Linux runtime prefers an explicit YAML profile file; Windows init uses --profile name.
+    const profileFile = process.env.TUNNEL_CLIENT_PROFILE_FILE || process.env.MCP_TUNNEL_PROFILE_FILE || "";
+    const runArgs = profileFile
+      ? ["run", "--profile-file", profileFile, "--health.listen-addr", healthListenAddr]
+      : ["run", "--profile", clientProfile, "--health.listen-addr", healthListenAddr];
+    tunnelProcess = await spawnTunnelProcess(clientPath, runArgs, {
       cwd: projectRoot,
       env: buildTunnelClientEnvironment(process.env, controlPlaneApiKey, {
         MCP_WORKSPACE_ROOT: context.workspace,
